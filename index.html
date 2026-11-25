@@ -67,7 +67,6 @@ details input{margin-top:8px;font-size:.95rem;padding:10px 12px}
 </head>
 <body>
 <main id="app"></main>
-<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script>
 var PAL=[
 {e:"🌹",n:"Rose",c:"#e0264a",w:"crimson"},
@@ -102,27 +101,31 @@ S.code=rand4();
 try{var sv=JSON.parse(localStorage.getItem("tl")||"{}");if(sv.name)S.name=sv.name;if(sv.story)S.story=sv.story;if(sv.note)S.note=sv.note;if(sv.side)S.side=sv.side}catch(e){}
 function save(){try{localStorage.setItem("tl",JSON.stringify({name:S.name,story:S.story,note:S.note,side:S.side}))}catch(e){}}
 
-S.roomApi=window.mqtt?{join:p2pJoin}:null;
+var FB_URL="https://two-lant-default-rtdb.firebaseio.com";
+S.roomApi=/^https:\/\//.test(FB_URL)?{join:p2pJoin}:null;
 function tls(t){window.TLS=t;if(S.stage==="play")render()}
 function p2pJoin(name){return new Promise(function(res,rej){
-  var topic="twolanterns/v1/"+name.slice(3),cid=Math.random().toString(36).slice(2,10),mine={},remotes={},cbs=[],done=false,c=null,bi=0,last="";
-  var brokers=["wss://broker.hivemq.com:8884/mqtt","wss://broker.emqx.io:8084/mqtt","wss://test.mosquitto.org:8081"];
-  function live(){var b=null,now=Date.now();for(var k in remotes){if(now-remotes[k].t<7000&&(!b||remotes[k].t>b.t))b=remotes[k]}return b}
-  function fire(){var l=live(),sig=l?JSON.stringify(l.d):"";cbs.forEach(function(f){f()});last=sig}
-  function send(){if(c&&c.connected)c.publish(topic+"/"+cid,JSON.stringify(mine))}
+  var path=FB_URL.replace(/\/+$/,"")+"/rooms/"+name.slice(3),cid=Math.random().toString(36).slice(2,10),mine={},remotes={},cbs=[],done=false,snap=false,prev=false;
+  function live(){var b=null,now=Date.now();for(var k in remotes){var r=remotes[k];if(!r.init&&now-r.at<10000&&(!b||r.at>b.at))b=r}return b}
+  function fire(){cbs.forEach(function(f){f()})}
+  function put(){mine.t=Date.now();fetch(path+"/"+cid+".json",{method:"PUT",body:JSON.stringify(mine)}).catch(function(){})}
   var shim={peers:function(){var a=[{isMe:true,kind:"viewer",presence:mine}],l=live();if(l)a.push({isMe:false,kind:"viewer",presence:l.d});return a},
-   onPeers:function(f){cbs.push(f)},presence:function(o){mine=o;send();return Promise.resolve()}};
-  function go(){
-    var url=brokers[bi%brokers.length];tls("Connecting to server "+(bi%brokers.length+1)+" of "+brokers.length+"…");
-    var cc=mqtt.connect(url,{clientId:"tl-"+cid+"-"+bi,reconnectPeriod:2000,connectTimeout:6000,clean:true});c=cc;
-    var t=setTimeout(function(){if(!cc.connected){cc.end(true);bi++;go()}},7000);
-    cc.on("connect",function(){clearTimeout(t);tls("Connected. Waiting for your partner…");cc.subscribe(topic+"/+");send();if(!done){done=true;res(shim)}});
-    cc.on("message",function(tp,m){var id=tp.split("/").pop();if(id===cid)return;var d;try{d=JSON.parse(m.toString())}catch(e){return}var isNew=!live();remotes[id]={d:d,t:Date.now()};if(isNew)send();fire()});
-    cc.on("close",function(){if(cc.connected===false&&done)tls("Connection lost. Reconnecting…")});
-  }
-  go();
-  setInterval(function(){send();var had=last!=="";var l=live();if(had&&!l){fire()}},2000);
-  setTimeout(function(){if(!done){done=true;rej()}},25000);
+   onPeers:function(f){cbs.push(f)},presence:function(o){mine=o;put();return Promise.resolve()}};
+  function setNode(id,d){if(id===cid)return;if(d===null||typeof d!=="object"){delete remotes[id];return}
+   var r=remotes[id];if(!r)remotes[id]={d:d,at:Date.now(),first:d.t,init:!snap};else{r.d=d;r.at=Date.now();if(d.t!==r.first)r.init=false}}
+  function h(e){var m;try{m=JSON.parse(e.data)}catch(x){return}var p=m.path,d=m.data;
+   if(p==="/"){if(d&&typeof d==="object")for(var k in d)setNode(k,d[k])}
+   else{var parts=p.split("/").filter(Boolean),id=parts[0];if(parts.length===1)setNode(id,d);else if(remotes[id]){remotes[id].d[parts[1]]=d;remotes[id].at=Date.now()}}
+   snap=true;fire()}
+  tls("Connecting to the database…");
+  var es=new EventSource(path+".json");
+  es.addEventListener("put",h);es.addEventListener("patch",h);
+  es.addEventListener("cancel",function(){tls("The database refused access. Check the rules step.");if(!done){done=true;rej()}});
+  es.onopen=function(){tls("Connected. Waiting for your partner…");if(!done){done=true;res(shim)}};
+  es.onerror=function(){tls("Connection lost. Reconnecting…")};
+  setInterval(function(){put();var now=!!live();if(prev&&!now)fire();prev=now;if(now&&window.TLS!=="Partner connected ✨")tls("Partner connected ✨")},3000);
+  window.addEventListener("pagehide",function(){try{fetch(path+"/"+cid+".json",{method:"DELETE",keepalive:true})}catch(x){}});
+  setTimeout(function(){if(!done){done=true;rej()}},15000);
 })}
 
 /* sound */
@@ -192,7 +195,7 @@ function lobby(){
   ["Where you met","Your first date","The proposal","Your wedding day","Your home"].map(function(l,i){return'<input class="st" data-k="'+i+'" maxlength="70" value="'+esc(S.story[i])+'" placeholder="'+l+'…">'}).join("")+
   '<input id="nt" maxlength="160" value="'+esc(S.note)+'" placeholder="A secret note for your partner at the end 💌"></details>'+
   '<div class="panel"><label>Room code (same on both phones)</label><input id="cd" maxlength="8" value="'+esc(S.code)+'" autocapitalize="characters"></div>'+
-  (nope?'<p class="note">Couldn’t load the connection library. Check your internet and refresh.</p>':'')+
+  (nope?'<p class="note">The database isn’t set up yet. Add your Firebase URL to the file.</p>':'')+
   '<p class="msg">'+esc(S.err)+'</p><button class="big" id="go"'+(S.roomApi?"":" disabled")+'>Light the lanterns</button>';
   var nm=document.getElementById("nm"),cd=document.getElementById("cd"),nt=document.getElementById("nt");
   nm.oninput=function(){S.name=nm.value};nt.oninput=function(){S.note=nt.value};
